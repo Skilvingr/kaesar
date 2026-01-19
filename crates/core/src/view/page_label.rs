@@ -1,12 +1,15 @@
-use crate::device::CURRENT_DEVICE;
-use crate::font::{Fonts, font_from_style, NORMAL_STYLE};
-use crate::color::{BLACK, WHITE};
-use crate::gesture::GestureEvent;
-use crate::geom::{Rectangle};
-use crate::document::BYTES_PER_PAGE;
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use super::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, ViewId};
+use crate::view::renderer::RenderQueue;
+
+use super::{Bus, Event, Hub, ID_FEEDER, Id, View, ViewId};
+use crate::colour::{BLACK, WHITE};
 use crate::context::Context;
+use crate::device::CURRENT_DEVICE;
+use crate::document::BYTES_PER_PAGE;
+use crate::font::{NORMAL_STYLE, font_from_style};
+use crate::framebuffer::UpdateMode;
+use crate::geom::Rectangle;
+use crate::input::gestures::GestureEvent;
+use crate::view::renderer::RenderData;
 
 pub struct PageLabel {
     id: Id,
@@ -18,7 +21,12 @@ pub struct PageLabel {
 }
 
 impl PageLabel {
-    pub fn new(rect: Rectangle, current_page: usize, pages_count: usize, synthetic: bool)  -> PageLabel {
+    pub fn new(
+        rect: Rectangle,
+        current_page: usize,
+        pages_count: usize,
+        synthetic: bool,
+    ) -> PageLabel {
         PageLabel {
             id: ID_FEEDER.next(),
             rect,
@@ -29,7 +37,12 @@ impl PageLabel {
         }
     }
 
-    pub fn update(&mut self, current_page: usize, pages_count: usize, rq: &mut RenderQueue) {
+    pub fn update(
+        &mut self,
+        current_page: usize,
+        pages_count: usize,
+        rendering_ctx: &mut Option<RenderQueue>,
+    ) {
         let mut render = false;
         if self.current_page != current_page {
             self.current_page = current_page;
@@ -40,7 +53,10 @@ impl PageLabel {
             render = true;
         }
         if render {
-            rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+            RenderQueue::add_redraw_req(
+                rendering_ctx,
+                RenderData::new(self.id, self.rect, UpdateMode::Gui),
+            );
         }
     }
 
@@ -49,42 +65,61 @@ impl PageLabel {
             return "No pages".to_string();
         }
         let (current_page, pages_count, precision) = if self.synthetic {
-            (self.current_page as f64 / BYTES_PER_PAGE,
-             self.pages_count as f64 / BYTES_PER_PAGE, 1)
+            (
+                self.current_page as f64 / BYTES_PER_PAGE,
+                self.pages_count as f64 / BYTES_PER_PAGE,
+                1,
+            )
         } else {
-            (self.current_page as f64 + 1.0,
-             self.pages_count as f64, 0)
+            (self.current_page as f64 + 1.0, self.pages_count as f64, 0)
         };
         let percent = 100.0 * self.current_page as f32 / self.pages_count as f32;
         match size {
-            0 => format!("Page {1:.0$} of {2:.0$} ({3:.1}%)", precision, current_page, pages_count, percent),
-            1 => format!("P. {1:.0$} of {2:.0$} ({3:.1}%)", precision, current_page, pages_count, percent),
-            2 => format!("{1:.0$}/{2:.0$} ({3:.1}%)", precision, current_page, pages_count, percent),
+            0 => format!(
+                "Page {1:.0$} of {2:.0$} ({3:.1}%)",
+                precision, current_page, pages_count, percent
+            ),
+            1 => format!(
+                "P. {1:.0$} of {2:.0$} ({3:.1}%)",
+                precision, current_page, pages_count, percent
+            ),
+            2 => format!(
+                "{1:.0$}/{2:.0$} ({3:.1}%)",
+                precision, current_page, pages_count, percent
+            ),
             3 => format!("{1:.0$} ({2:.1}%)", precision, current_page, percent),
             _ => format!("{:.1}%", percent),
         }
     }
 }
 
-
 impl View for PageLabel {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, _rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        bus: &mut Bus,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
                 bus.push_back(Event::Toggle(ViewId::GoToPage));
                 true
-            },
-            Event::Gesture(GestureEvent::HoldFingerShort(center, ..)) if self.rect.includes(center) => {
+            }
+            Event::Gesture(GestureEvent::HoldFingerShort(center, ..))
+                if self.rect.includes(center) =>
+            {
                 bus.push_back(Event::ToggleNear(ViewId::PageMenu, self.rect));
                 true
-            },
+            }
             _ => false,
         }
     }
 
-    fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, fonts: &mut Fonts) {
+    fn render_view(&self, _rect: &Rectangle, ctx: &mut Context) {
         let dpi = CURRENT_DEVICE.dpi;
-        let font = font_from_style(fonts, &NORMAL_STYLE, dpi);
+        let font = font_from_style(&mut ctx.fonts, &NORMAL_STYLE, dpi);
         let padding = font.em() as i32 / 2;
         let max_width = self.rect.width().saturating_sub(2 * padding as u32) as i32;
         let mut plan = font.plan(&self.text(0), None, None);
@@ -98,8 +133,9 @@ impl View for PageLabel {
         let dx = padding + (max_width - plan.width) / 2;
         let dy = (self.rect.height() as i32 - font.x_heights.0 as i32) / 2;
         let pt = pt!(self.rect.min.x + dx, self.rect.max.y - dy);
-        fb.draw_rectangle(&self.rect, WHITE);
-        font.render(fb, BLACK, &plan, pt);
+
+        ctx.fb.draw_rectangle(&self.rect, WHITE);
+        font.render(ctx.fb.as_mut(), BLACK, &plan, pt);
     }
 
     fn rect(&self) -> &Rectangle {

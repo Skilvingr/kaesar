@@ -1,14 +1,17 @@
-use crate::device::CURRENT_DEVICE;
-use crate::geom::{Rectangle, CornerSpec, CycleDir};
-use crate::font::{Fonts, font_from_style, NORMAL_STYLE};
-use super::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData};
+use crate::view::renderer::RenderQueue;
+
 use super::BORDER_RADIUS_MEDIUM;
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::input::{DeviceEvent, FingerStatus};
-use crate::gesture::GestureEvent;
-use crate::color::{TEXT_NORMAL, TEXT_INVERTED_HARD};
-use crate::unit::scale_by_dpi;
+use super::{Bus, Event, Hub, ID_FEEDER, Id, View};
+use crate::colour::{TEXT_INVERTED_HARD, TEXT_NORMAL};
 use crate::context::Context;
+use crate::device::CURRENT_DEVICE;
+use crate::font::{NORMAL_STYLE, font_from_style};
+use crate::framebuffer::UpdateMode;
+use crate::geom::{CornerSpec, CycleDir, Rectangle};
+use crate::input::gestures::GestureEvent;
+use crate::input::{DeviceEvent, FingerStatus};
+use crate::unit::scale_by_dpi;
+use crate::view::renderer::RenderData;
 
 pub struct Preset {
     id: Id,
@@ -36,22 +39,39 @@ impl Preset {
 }
 
 impl View for Preset {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        bus: &mut Bus,
+        rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) -> bool {
         match *evt {
-            Event::Device(DeviceEvent::Finger { status, position, .. }) => {
-                match status {
-                    FingerStatus::Down if self.rect.includes(position) => {
-                        self.active = true;
-                        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Fast));
-                        true
-                    },
-                    FingerStatus::Up if self.active => {
-                        self.active = false;
-                        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
-                        true
-                    },
-                    _ => false,
+            Event::Device(DeviceEvent::Finger {
+                status, position, ..
+            }) => match status {
+                FingerStatus::Down if self.rect.includes(position) => {
+                    self.active = true;
+
+                    RenderQueue::add_redraw_req(
+                        rendering_ctx,
+                        RenderData::new(self.id, self.rect, UpdateMode::Fast),
+                    );
+
+                    true
                 }
+                FingerStatus::Up if self.active => {
+                    self.active = false;
+
+                    RenderQueue::add_redraw_req(
+                        rendering_ctx,
+                        RenderData::new(self.id, self.rect, UpdateMode::Gui),
+                    );
+
+                    true
+                }
+                _ => false,
             },
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
                 match self.kind {
@@ -59,29 +79,35 @@ impl View for Preset {
                     PresetKind::Page(dir) => bus.push_back(Event::Page(dir)),
                 }
                 true
-            },
-            Event::Gesture(GestureEvent::HoldFingerShort(center, ..)) if self.rect.includes(center) => {
+            }
+            Event::Gesture(GestureEvent::HoldFingerShort(center, ..))
+                if self.rect.includes(center) =>
+            {
                 if let PresetKind::Normal(_, index) = self.kind {
-                    bus.push_back(Event::TogglePresetMenu(self.rect, index)); 
+                    bus.push_back(Event::TogglePresetMenu(self.rect, index));
                 }
                 true
-            },
+            }
             _ => false,
         }
     }
 
-    fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, fonts: &mut Fonts) {
+    fn render_view(&self, _rect: &Rectangle, ctx: &mut Context) {
         let dpi = CURRENT_DEVICE.dpi;
 
         let (scheme, border_radius) = if self.active {
-            (TEXT_INVERTED_HARD, scale_by_dpi(BORDER_RADIUS_MEDIUM, dpi) as i32)
+            (
+                TEXT_INVERTED_HARD,
+                scale_by_dpi(BORDER_RADIUS_MEDIUM, dpi) as i32,
+            )
         } else {
             (TEXT_NORMAL, 0)
         };
 
-        fb.draw_rounded_rectangle(&self.rect, &CornerSpec::Uniform(border_radius), scheme[0]);
+        ctx.fb
+            .draw_rounded_rectangle(&self.rect, &CornerSpec::Uniform(border_radius), scheme[0]);
 
-        let font = font_from_style(fonts, &NORMAL_STYLE, dpi);
+        let font = font_from_style(&mut ctx.fonts, &NORMAL_STYLE, dpi);
         let x_height = font.x_heights.0 as i32;
         let padding = font.em() as i32;
         let max_width = self.rect.width() as i32 - padding;
@@ -97,7 +123,7 @@ impl View for Preset {
         let dy = (self.rect.height() as i32 - x_height) / 2;
         let pt = pt!(self.rect.min.x + dx, self.rect.max.y - dy);
 
-        font.render(fb, scheme[1], &plan, pt);
+        font.render(ctx.fb.as_mut(), scheme[1], &plan, pt);
     }
 
     fn rect(&self) -> &Rectangle {

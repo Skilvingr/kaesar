@@ -1,14 +1,15 @@
-use std::path::{PathBuf, Path};
-use crate::device::CURRENT_DEVICE;
-use crate::gesture::GestureEvent;
-use crate::font::{Fonts, font_from_style, NORMAL_STYLE};
-use crate::color::{WHITE, BLACK, TEXT_BUMP_SMALL};
-use crate::geom::{Rectangle, CornerSpec, BorderSpec};
-use crate::framebuffer::Framebuffer;
-use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, Align};
-use crate::view::{THICKNESS_SMALL, BORDER_RADIUS_SMALL};
-use crate::unit::scale_by_dpi;
+use crate::colour::{BLACK, TEXT_BUMP_SMALL, WHITE};
 use crate::context::Context;
+use crate::device::CURRENT_DEVICE;
+use crate::font::{NORMAL_STYLE, font_from_style};
+use crate::geom::{BorderSpec, CornerSpec, Rectangle};
+use crate::input::gestures::GestureEvent;
+use crate::unit::scale_by_dpi;
+
+use crate::view::renderer::RenderQueue;
+use crate::view::{Align, Bus, Event, Hub, ID_FEEDER, Id, View};
+use crate::view::{BORDER_RADIUS_SMALL, THICKNESS_SMALL};
+use std::path::{Path, PathBuf};
 
 pub struct Directory {
     id: Id,
@@ -21,7 +22,13 @@ pub struct Directory {
 }
 
 impl Directory {
-    pub fn new(rect: Rectangle, path: PathBuf, selected: bool, align: Align, max_width: Option<i32>) -> Directory {
+    pub fn new(
+        rect: Rectangle,
+        path: PathBuf,
+        selected: bool,
+        align: Align,
+        max_width: Option<i32>,
+    ) -> Directory {
         Directory {
             id: ID_FEEDER.next(),
             rect,
@@ -41,20 +48,29 @@ impl Directory {
 }
 
 impl View for Directory {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, _rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        bus: &mut Bus,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
                 bus.push_back(Event::ToggleSelectDirectory(self.path.clone()));
                 true
-            },
+            }
             _ => false,
         }
     }
 
-    fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, fonts: &mut Fonts) {
+    fn render_view(&self, _rect: &Rectangle, ctx: &mut Context) {
         let dpi = CURRENT_DEVICE.dpi;
-        fb.draw_rectangle(&self.rect, TEXT_BUMP_SMALL[0]);
-        let font = font_from_style(fonts, &NORMAL_STYLE, dpi);
+
+        ctx.fb.draw_rectangle(&self.rect, TEXT_BUMP_SMALL[0]);
+
+        let font = font_from_style(&mut ctx.fonts, &NORMAL_STYLE, dpi);
         let x_height = font.x_heights.0 as i32;
         let text = self.path.file_name().unwrap().to_string_lossy();
         let plan = font.plan(text, self.max_width, None);
@@ -73,15 +89,20 @@ impl View for Directory {
             let bg_rect = rect![pt, pt + pt!(bg_width, bg_height)];
             let border_radius = scale_by_dpi(BORDER_RADIUS_SMALL, dpi) as i32;
             let border_thickness = scale_by_dpi(THICKNESS_SMALL, dpi) as u16;
-            fb.draw_rounded_rectangle_with_border(&bg_rect,
-                                                  &CornerSpec::Uniform(border_radius),
-                                                  &BorderSpec { thickness: border_thickness,
-                                                                color: BLACK },
-                                                  &WHITE);
+
+            ctx.fb.draw_rounded_rectangle_with_border(
+                &bg_rect,
+                &CornerSpec::Uniform(border_radius),
+                &BorderSpec {
+                    thickness: border_thickness,
+                    color: BLACK,
+                },
+                &WHITE,
+            );
         }
 
         let pt = pt!(self.rect.min.x + dx, self.rect.max.y - dy);
-        font.render(fb, TEXT_BUMP_SMALL[1], &plan, pt);
+        font.render(ctx.fb.as_mut(), TEXT_BUMP_SMALL[1], &plan, pt);
     }
 
     fn rect(&self) -> &Rectangle {

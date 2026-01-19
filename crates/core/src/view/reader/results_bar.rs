@@ -1,15 +1,16 @@
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, ViewId};
-use crate::view::icon::Icon;
-use crate::view::filler::Filler;
-use crate::view::page_label::PageLabel;
+use crate::view::renderer::RenderQueue;
+
 use super::results_label::ResultsLabel;
-use crate::gesture::GestureEvent;
-use crate::input::DeviceEvent;
-use crate::geom::{Rectangle, CycleDir, halves};
-use crate::color::WHITE;
+use crate::colour::WHITE;
 use crate::context::Context;
-use crate::font::Fonts;
+use crate::framebuffer::UpdateMode;
+use crate::geom::{CycleDir, Rectangle, halves};
+use crate::input::DeviceEvent;
+use crate::input::gestures::GestureEvent;
+use crate::view::filler::Filler;
+use crate::view::icon::Icon;
+use crate::view::page_label::PageLabel;
+use crate::view::{Bus, Event, Hub, ID_FEEDER, Id, RenderData, View, ViewId};
 
 #[derive(Debug)]
 pub struct ResultsBar {
@@ -21,7 +22,13 @@ pub struct ResultsBar {
 }
 
 impl ResultsBar {
-    pub fn new(rect: Rectangle, current_page: usize, pages_count: usize, count: usize, completed: bool) -> ResultsBar {
+    pub fn new(
+        rect: Rectangle,
+        current_page: usize,
+        pages_count: usize,
+        count: usize,
+        completed: bool,
+    ) -> ResultsBar {
         let id = ID_FEEDER.next();
         let mut children = Vec::new();
         let side = rect.height() as i32;
@@ -34,24 +41,34 @@ impl ResultsBar {
             let prev_filler = Filler::new(prev_rect, WHITE);
             children.push(Box::new(prev_filler) as Box<dyn View>);
         } else {
-            let prev_icon = Icon::new("angle-left",
-                                      prev_rect,
-                                      Event::ResultsPage(CycleDir::Previous));
+            let prev_icon = Icon::new(
+                "angle-left",
+                prev_rect,
+                Event::ResultsPage(CycleDir::Previous),
+            );
             children.push(Box::new(prev_icon) as Box<dyn View>);
         }
 
         let (small_half_width, big_half_width) = halves(rect.width() as i32 - 2 * side);
-        let results_label = ResultsLabel::new(rect![pt!(rect.min.x + side, rect.min.y),
-                                                    pt!(rect.min.x + side + small_half_width, rect.max.y)],
-                                              count,
-                                              completed);
+        let results_label = ResultsLabel::new(
+            rect![
+                pt!(rect.min.x + side, rect.min.y),
+                pt!(rect.min.x + side + small_half_width, rect.max.y)
+            ],
+            count,
+            completed,
+        );
         children.push(Box::new(results_label) as Box<dyn View>);
 
-        let page_label = PageLabel::new(rect![pt!(rect.max.x - side - big_half_width, rect.min.y),
-                                              pt!(rect.max.x - side, rect.max.y)],
-                                        current_page,
-                                        pages_count,
-                                        false);
+        let page_label = PageLabel::new(
+            rect![
+                pt!(rect.max.x - side - big_half_width, rect.min.y),
+                pt!(rect.max.x - side, rect.max.y)
+            ],
+            current_page,
+            pages_count,
+            false,
+        );
         children.push(Box::new(page_label) as Box<dyn View>);
 
         let next_rect = rect![rect.max - side, rect.max];
@@ -60,9 +77,11 @@ impl ResultsBar {
             let next_filler = Filler::new(next_rect, WHITE);
             children.push(Box::new(next_filler) as Box<dyn View>);
         } else {
-            let next_icon = Icon::new("angle-right",
-                                      rect![rect.max - side, rect.max],
-                                      Event::ResultsPage(CycleDir::Next));
+            let next_icon = Icon::new(
+                "angle-right",
+                rect![rect.max - side, rect.max],
+                Event::ResultsPage(CycleDir::Next),
+            );
             children.push(Box::new(next_icon) as Box<dyn View>);
         }
 
@@ -75,17 +94,33 @@ impl ResultsBar {
         }
     }
 
-    pub fn update_results_label(&mut self, count: usize, rq: &mut RenderQueue) {
-        let results_label = self.children[1].as_mut().downcast_mut::<ResultsLabel>().unwrap();
-        results_label.update(count, rq);
+    pub fn update_results_label(&mut self, count: usize, rendering_ctx: &mut Option<RenderQueue>) {
+        let results_label = self.children[1]
+            .as_mut()
+            .downcast_mut::<ResultsLabel>()
+            .unwrap();
+        results_label.update(count, rendering_ctx);
     }
 
-    pub fn update_page_label(&mut self, current_page: usize, pages_count: usize, rq: &mut RenderQueue) {
-        let page_label = self.children[2].as_mut().downcast_mut::<PageLabel>().unwrap();
-        page_label.update(current_page, pages_count, rq);
+    pub fn update_page_label(
+        &mut self,
+        current_page: usize,
+        pages_count: usize,
+        rendering_ctx: &mut Option<RenderQueue>,
+    ) {
+        let page_label = self.children[2]
+            .as_mut()
+            .downcast_mut::<PageLabel>()
+            .unwrap();
+        page_label.update(current_page, pages_count, rendering_ctx);
     }
 
-    pub fn update_icons(&mut self, current_page: usize, pages_count: usize, rq: &mut RenderQueue) {
+    pub fn update_icons(
+        &mut self,
+        current_page: usize,
+        pages_count: usize,
+        rendering_ctx: &mut Option<RenderQueue>,
+    ) {
         let is_prev_disabled = pages_count < 2 || current_page == 0;
 
         if self.is_prev_disabled != is_prev_disabled {
@@ -95,13 +130,18 @@ impl ResultsBar {
                 let prev_filler = Filler::new(prev_rect, WHITE);
                 self.children[index] = Box::new(prev_filler) as Box<dyn View>;
             } else {
-                let prev_icon = Icon::new("angle-left",
-                                          prev_rect,
-                                          Event::ResultsPage(CycleDir::Previous));
+                let prev_icon = Icon::new(
+                    "angle-left",
+                    prev_rect,
+                    Event::ResultsPage(CycleDir::Previous),
+                );
                 self.children[index] = Box::new(prev_icon) as Box<dyn View>;
             }
             self.is_prev_disabled = is_prev_disabled;
-            rq.add(RenderData::new(self.id, prev_rect, UpdateMode::Gui));
+            RenderQueue::add_redraw_req(
+                rendering_ctx,
+                RenderData::new(self.id, prev_rect, UpdateMode::Gui),
+            );
         }
 
         let is_next_disabled = pages_count < 2 || current_page == pages_count - 1;
@@ -113,49 +153,84 @@ impl ResultsBar {
                 let next_filler = Filler::new(next_rect, WHITE);
                 self.children[index] = Box::new(next_filler) as Box<dyn View>;
             } else {
-                let next_icon = Icon::new("angle-right",
-                                          next_rect,
-                                          Event::ResultsPage(CycleDir::Next));
+                let next_icon =
+                    Icon::new("angle-right", next_rect, Event::ResultsPage(CycleDir::Next));
                 self.children[index] = Box::new(next_icon) as Box<dyn View>;
             }
             self.is_next_disabled = is_next_disabled;
-            rq.add(RenderData::new(self.id, next_rect, UpdateMode::Gui));
+            RenderQueue::add_redraw_req(
+                rendering_ctx,
+                RenderData::new(self.id, next_rect, UpdateMode::Gui),
+            );
         }
     }
 }
 
 impl View for ResultsBar {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, _rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        bus: &mut Bus,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) -> bool {
         match *evt {
             Event::Toggle(ViewId::GoToPage) => {
                 bus.push_back(Event::Toggle(ViewId::GoToResultsPage));
                 true
-            },
+            }
             Event::ToggleNear(ViewId::PageMenu, _) => true,
-            Event::Gesture(GestureEvent::Tap(center)) |
-            Event::Gesture(GestureEvent::HoldFingerShort(center, ..)) if self.rect.includes(center) => true,
-            Event::Gesture(GestureEvent::Swipe { start, .. }) if self.rect.includes(start) => true,
-            Event::Device(DeviceEvent::Finger { position, .. }) if self.rect.includes(position) => true,
+            Event::Gesture(GestureEvent::Tap(center))
+            | Event::Gesture(GestureEvent::HoldFingerShort(center, ..))
+                if self.rect.includes(center) =>
+            {
+                true
+            }
+            Event::Gesture(GestureEvent::Swipe { start, .. })
+            | Event::Gesture(GestureEvent::Movement { start, .. })
+                if self.rect.includes(start) =>
+            {
+                true
+            }
+            Event::Device(DeviceEvent::Finger { position, .. }) if self.rect.includes(position) => {
+                true
+            }
             _ => false,
         }
     }
 
-    fn render(&self, _fb: &mut dyn Framebuffer, _rect: Rectangle, _fonts: &mut Fonts) {
-    }
-
-    fn resize(&mut self, rect: Rectangle, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+    fn resize(
+        &mut self,
+        rect: Rectangle,
+        hub: &Hub,
+        rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) {
         let side = rect.height() as i32;
         let (small_half_width, big_half_width) = halves(rect.width() as i32 - 2 * side);
         let prev_rect = rect![rect.min, rect.min + side];
-        self.children[0].resize(prev_rect, hub, rq, context);
-        self.children[1].resize(rect![pt!(rect.min.x + side, rect.min.y),
-                                      pt!(rect.min.x + side + small_half_width, rect.max.y)],
-                                hub, rq, context);
-        self.children[2].resize(rect![pt!(rect.max.x - side - big_half_width, rect.min.y),
-                                      pt!(rect.max.x - side, rect.max.y)],
-                                hub, rq, context);
+        self.children[0].resize(prev_rect, hub, rendering_ctx, context);
+        self.children[1].resize(
+            rect![
+                pt!(rect.min.x + side, rect.min.y),
+                pt!(rect.min.x + side + small_half_width, rect.max.y)
+            ],
+            hub,
+            rendering_ctx,
+            context,
+        );
+        self.children[2].resize(
+            rect![
+                pt!(rect.max.x - side - big_half_width, rect.min.y),
+                pt!(rect.max.x - side, rect.max.y)
+            ],
+            hub,
+            rendering_ctx,
+            context,
+        );
         let next_rect = rect![rect.max - side, rect.max];
-        self.children[3].resize(next_rect, hub, rq, context);
+        self.children[3].resize(next_rect, hub, rendering_ctx, context);
         self.rect = rect;
     }
 

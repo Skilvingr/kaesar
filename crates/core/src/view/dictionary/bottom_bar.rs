@@ -1,14 +1,15 @@
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, ViewId, Align};
-use crate::view::icon::Icon;
-use crate::view::filler::Filler;
-use crate::view::label::Label;
-use crate::gesture::GestureEvent;
-use crate::input::DeviceEvent;
-use crate::geom::{Rectangle, CycleDir};
-use crate::color::WHITE;
-use crate::font::Fonts;
+use crate::view::renderer::RenderQueue;
+
+use crate::colour::WHITE;
 use crate::context::Context;
+use crate::framebuffer::UpdateMode;
+use crate::geom::{CycleDir, Rectangle};
+use crate::input::DeviceEvent;
+use crate::input::gestures::GestureEvent;
+use crate::view::filler::Filler;
+use crate::view::icon::Icon;
+use crate::view::label::Label;
+use crate::view::{Align, Bus, Event, Hub, ID_FEEDER, Id, RenderData, View, ViewId};
 
 #[derive(Debug)]
 pub struct BottomBar {
@@ -28,28 +29,30 @@ impl BottomBar {
         let prev_rect = rect![rect.min, rect.min + side];
 
         if has_prev {
-            let prev_icon = Icon::new("arrow-left",
-                                      prev_rect,
-                                      Event::Page(CycleDir::Previous));
+            let prev_icon = Icon::new("arrow-left", prev_rect, Event::Page(CycleDir::Previous));
             children.push(Box::new(prev_icon) as Box<dyn View>);
         } else {
             let prev_filler = Filler::new(prev_rect, WHITE);
             children.push(Box::new(prev_filler) as Box<dyn View>);
         }
 
-        let name_rect = rect![pt!(rect.min.x + side, rect.min.y),
-                              pt!(rect.max.x - side, rect.max.y)];
+        let name_rect = rect![
+            pt!(rect.min.x + side, rect.min.y),
+            pt!(rect.max.x - side, rect.max.y)
+        ];
         let name_label = Label::new(name_rect, name.to_string(), Align::Center)
-                               .event(Some(Event::ToggleNear(ViewId::SearchTargetMenu, name_rect)))
-                               .hold_event(Some(Event::EditLanguages));
+            .event(Some(Event::ToggleNear(ViewId::SearchTargetMenu, name_rect)))
+            .hold_event(Some(Event::EditLanguages));
         children.push(Box::new(name_label) as Box<dyn View>);
 
         let next_rect = rect![rect.max - side, rect.max];
 
         if has_next {
-            let next_icon = Icon::new("arrow-right",
-                                      rect![rect.max - side, rect.max],
-                                      Event::Page(CycleDir::Next));
+            let next_icon = Icon::new(
+                "arrow-right",
+                rect![rect.max - side, rect.max],
+                Event::Page(CycleDir::Next),
+            );
             children.push(Box::new(next_icon) as Box<dyn View>);
         } else {
             let next_filler = Filler::new(next_rect, WHITE);
@@ -65,68 +68,95 @@ impl BottomBar {
         }
     }
 
-    pub fn update_icons(&mut self, has_prev: bool, has_next: bool, rq: &mut RenderQueue) {
+    pub fn update_icons(
+        &mut self,
+        has_prev: bool,
+        has_next: bool,
+        rendering_ctx: &mut Option<RenderQueue>,
+    ) {
         if self.has_prev != has_prev {
             let index = 0;
             let prev_rect = *self.child(index).rect();
             if has_prev {
-                let prev_icon = Icon::new("arrow-left",
-                                          prev_rect,
-                                          Event::Page(CycleDir::Previous));
+                let prev_icon = Icon::new("arrow-left", prev_rect, Event::Page(CycleDir::Previous));
                 self.children[index] = Box::new(prev_icon) as Box<dyn View>;
             } else {
                 let prev_filler = Filler::new(prev_rect, WHITE);
                 self.children[index] = Box::new(prev_filler) as Box<dyn View>;
             }
             self.has_prev = has_prev;
-            rq.add(RenderData::new(self.id, prev_rect, UpdateMode::Gui));
+
+            RenderQueue::add_redraw_req(
+                rendering_ctx,
+                RenderData::new(self.id, prev_rect, UpdateMode::Gui),
+            );
         }
 
         if self.has_next != has_next {
             let index = self.len() - 1;
             let next_rect = *self.child(index).rect();
             if has_next {
-                let next_icon = Icon::new("arrow-right",
-                                          next_rect,
-                                          Event::Page(CycleDir::Next));
+                let next_icon = Icon::new("arrow-right", next_rect, Event::Page(CycleDir::Next));
                 self.children[index] = Box::new(next_icon) as Box<dyn View>;
             } else {
                 let next_filler = Filler::new(next_rect, WHITE);
                 self.children[index] = Box::new(next_filler) as Box<dyn View>;
             }
             self.has_next = has_next;
-            rq.add(RenderData::new(self.id, next_rect, UpdateMode::Gui));
+
+            RenderQueue::add_redraw_req(
+                rendering_ctx,
+                RenderData::new(self.id, next_rect, UpdateMode::Gui),
+            );
         }
     }
 
-    pub fn update_name(&mut self, text: &str, rq: &mut RenderQueue) {
+    pub fn update_name(&mut self, text: &str, rendering_ctx: &mut Option<RenderQueue>) {
         let name_label = self.child_mut(1).downcast_mut::<Label>().unwrap();
-        name_label.update(text, rq);
+        name_label.update(text, rendering_ctx);
     }
 }
 
 impl View for BottomBar {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, _bus: &mut Bus, _rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        _bus: &mut Bus,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) -> bool {
         match *evt {
-            Event::Gesture(GestureEvent::Tap(center)) |
-            Event::Gesture(GestureEvent::HoldFingerShort(center, ..)) if self.rect.includes(center) => true,
-            Event::Device(DeviceEvent::Finger { position, .. }) if self.rect.includes(position) => true,
+            Event::Gesture(GestureEvent::Tap(center))
+            | Event::Gesture(GestureEvent::HoldFingerShort(center, ..))
+                if self.rect.includes(center) =>
+            {
+                true
+            }
+            Event::Device(DeviceEvent::Finger { position, .. }) if self.rect.includes(position) => {
+                true
+            }
             _ => false,
         }
     }
 
-    fn render(&self, _fb: &mut dyn Framebuffer, _rect: Rectangle, _fonts: &mut Fonts) {
-    }
-
-    fn resize(&mut self, rect: Rectangle, hub: &Hub, rq: &mut RenderQueue, context: &mut Context) {
+    fn resize(
+        &mut self,
+        rect: Rectangle,
+        hub: &Hub,
+        rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) {
         let side = rect.height() as i32;
         let prev_rect = rect![rect.min, rect.min + side];
-        self.children[0].resize(prev_rect, hub, rq, context);
-        let name_rect = rect![pt!(rect.min.x + side, rect.min.y),
-                              pt!(rect.max.x - side, rect.max.y)];
-        self.children[1].resize(name_rect, hub, rq, context);
+        self.children[0].resize(prev_rect, hub, rendering_ctx, context);
+        let name_rect = rect![
+            pt!(rect.min.x + side, rect.min.y),
+            pt!(rect.max.x - side, rect.max.y)
+        ];
+        self.children[1].resize(name_rect, hub, rendering_ctx, context);
         let next_rect = rect![rect.max - side, rect.max];
-        self.children[2].resize(next_rect, hub, rq, context);
+        self.children[2].resize(next_rect, hub, rendering_ctx, context);
         self.rect = rect;
     }
 

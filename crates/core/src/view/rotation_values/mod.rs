@@ -1,17 +1,19 @@
-use std::mem;
-use crate::device::CURRENT_DEVICE;
-use crate::geom::{Point, Rectangle};
-use crate::view::{View, Event, Hub, Bus, RenderQueue, RenderData};
-use crate::view::{Id, ID_FEEDER};
-use crate::gesture::GestureEvent;
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::font::{Fonts, font_from_style, NORMAL_STYLE, DISPLAY_STYLE};
-use crate::color::{BLACK, WHITE, GRAY07};
+use crate::colour::{BLACK, GREY07, WHITE};
 use crate::context::Context;
+use crate::device::CURRENT_DEVICE;
+use crate::font::{DISPLAY_STYLE, NORMAL_STYLE, font_from_style};
+use crate::framebuffer::UpdateMode;
+use crate::geom::{Point, Rectangle};
+use crate::input::gestures::GestureEvent;
+
+use crate::view::renderer::RenderQueue;
+use crate::view::{Bus, Event, Hub, RenderData, View};
+use crate::view::{ID_FEEDER, Id};
+use std::mem;
 
 const MESSAGE_1: &str = "Hold you device in portrait mode\n\
                          with the Kobo logo at the bottom,\n\
-                         and tap each gray corner\n\
+                         and tap each grey corner\n\
                          in clockwise order\n\
                          starting from the top left.";
 const MESSAGE_2: &str = "Tap the black corner.";
@@ -33,13 +35,17 @@ pub struct RotationValues {
 }
 
 impl RotationValues {
-    pub fn new(rect: Rectangle, rq: &mut RenderQueue, context: &mut Context) -> RotationValues {
+    pub fn new(
+        rect: Rectangle,
+        rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) -> RotationValues {
         let id = ID_FEEDER.next();
-        let rotation = context.display.rotation;
+        let rotation = context.fb.rotation();
         let (width, height) = context.display.dims;
         let (mirror_x, mirror_y) = CURRENT_DEVICE.should_mirror_axes(rotation);
         let swap_xy = CURRENT_DEVICE.should_swap_axes(rotation);
-        rq.add(RenderData::new(id, rect, UpdateMode::Full));
+        RenderQueue::add_redraw_req(rendering_ctx, RenderData::new(id, rect, UpdateMode::Full));
         RotationValues {
             id,
             rect,
@@ -58,7 +64,14 @@ impl RotationValues {
 }
 
 impl View for RotationValues {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, _bus: &mut Bus, rq: &mut RenderQueue, context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        hub: &Hub,
+        _bus: &mut Bus,
+        rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Tap(mut pt)) if !self.finished => {
                 if self.mirror_x {
@@ -84,12 +97,16 @@ impl View for RotationValues {
                     } else {
                         (self.taps.len() - CORNERS_COUNT) as i8
                     };
-                    context.fb.set_rotation(rotation)
-                           .map_err(|e| eprintln!("Can't set rotation: {:#}.", e))
-                           .ok();
+
+                    let _ = context
+                        .fb
+                        .set_rotation(rotation)
+                        .map_err(|e| eprintln!("Can't set rotation: {:#}.", e));
+
                     if context.fb.rotation() == self.read_rotation {
                         self.written_rotation = rotation;
                     }
+
                     self.children.clear();
                     self.rect = context.fb.rect();
                 }
@@ -97,16 +114,18 @@ impl View for RotationValues {
                 if self.finished {
                     // Infer the startup rotation and the mirroring scheme.
                     let first = self.taps[0];
-                    let startup_rotation = self.taps[CORNERS_COUNT..2*CORNERS_COUNT].iter()
-                                               .enumerate()
-                                               .min_by_key(|(_, &pt)| first.dist2(pt))
-                                               .map(|(i, _)| i)
-                                               .unwrap();
-                    let origin = self.taps[CORNERS_COUNT..2*CORNERS_COUNT].iter()
-                                     .enumerate()
-                                     .min_by_key(|(_, pt)| pt.x + pt.y)
-                                     .map(|(i, _)| i)
-                                     .unwrap();
+                    let startup_rotation = self.taps[CORNERS_COUNT..2 * CORNERS_COUNT]
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, pt)| first.dist2(**pt))
+                        .map(|(i, _)| i)
+                        .unwrap();
+                    let origin = self.taps[CORNERS_COUNT..2 * CORNERS_COUNT]
+                        .iter()
+                        .enumerate()
+                        .min_by_key(|(_, pt)| pt.x + pt.y)
+                        .map(|(i, _)| i)
+                        .unwrap();
                     let center = (origin + 2) % 4;
                     let next = self.taps[CORNERS_COUNT + (center + 1) % 4];
                     let polarity = 2 * ((origin + startup_rotation) as i8 % 2) - 1;
@@ -115,31 +134,34 @@ impl View for RotationValues {
                     println!("Mirroring scheme: ({}, {}).", center, dir);
                     hub.send(Event::Back).ok();
                 } else {
-                    rq.add(RenderData::new(self.id, self.rect, UpdateMode::Full));
+                    RenderQueue::add_redraw_req(
+                        rendering_ctx,
+                        RenderData::new(self.id, self.rect, UpdateMode::Full),
+                    );
                 }
 
                 true
-            },
+            }
             _ => false,
         }
     }
 
-    fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, fonts: &mut Fonts) {
+    fn render_view(&self, _rect: &Rectangle, ctx: &mut Context) {
         let dpi = CURRENT_DEVICE.dpi;
         let width = self.rect.width() as i32;
         let height = self.rect.height() as i32;
         let side = width.min(height) / 4;
 
-        fb.draw_rectangle(&self.rect, WHITE);
+        ctx.fb.draw_rectangle(&self.rect, WHITE);
 
         let step = 1 + (self.taps.len() % CORNERS_COUNT);
         let msg = format!("{} / {}", step, CORNERS_COUNT);
-        let font = font_from_style(fonts, &DISPLAY_STYLE, dpi);
+        let font = font_from_style(&mut ctx.fonts, &DISPLAY_STYLE, dpi);
         let plan = font.plan(msg, None, Some(&["lnum".to_string()]));
         let dx = (width - plan.width as i32) / 2;
         let mut dy = (height - font.x_heights.1 as i32) / 3;
 
-        font.render(fb, BLACK, &plan, self.rect.min + pt!(dx, dy));
+        font.render(ctx.fb.as_mut(), BLACK, &plan, self.rect.min + pt!(dx, dy));
 
         dy += 4 * (font.x_heights.1 as i32) / 3;
         let msg = if self.taps.len() < CORNERS_COUNT {
@@ -147,25 +169,46 @@ impl View for RotationValues {
         } else {
             MESSAGE_2
         };
-        let font = font_from_style(fonts, &NORMAL_STYLE, dpi);
+        let font = font_from_style(&mut ctx.fonts, &NORMAL_STYLE, dpi);
 
         for line in msg.lines() {
             let plan = font.plan(line, None, None);
             let dx = (width - plan.width as i32) / 2;
-            font.render(fb, BLACK, &plan, self.rect.min + pt!(dx, dy));
+            font.render(ctx.fb.as_mut(), BLACK, &plan, self.rect.min + pt!(dx, dy));
             dy += 3 * font.x_heights.0 as i32;
         }
 
         if self.taps.len() < CORNERS_COUNT {
-            fb.draw_triangle(&[pt!(0, 0), pt!(side, 0), pt!(0, side)], GRAY07);
-            fb.draw_triangle(&[pt!(width - 1, 0), pt!(width - 1, side),
-                               pt!(width - 1 - side, 0)], GRAY07);
-            fb.draw_triangle(&[pt!(width - 1, height - 1), pt!(width - 1 - side, height - 1),
-                               pt!(width - 1, height - 1 - side)], GRAY07);
-            fb.draw_triangle(&[pt!(0, height - 1), pt!(0, height - 1 - side),
-                               pt!(side, height - 1)], GRAY07);
+            ctx.fb
+                .draw_triangle(&[pt!(0, 0), pt!(side, 0), pt!(0, side)], GREY07);
+
+            ctx.fb.draw_triangle(
+                &[
+                    pt!(width - 1, 0),
+                    pt!(width - 1, side),
+                    pt!(width - 1 - side, 0),
+                ],
+                GREY07,
+            );
+            ctx.fb.draw_triangle(
+                &[
+                    pt!(width - 1, height - 1),
+                    pt!(width - 1 - side, height - 1),
+                    pt!(width - 1, height - 1 - side),
+                ],
+                GREY07,
+            );
+            ctx.fb.draw_triangle(
+                &[
+                    pt!(0, height - 1),
+                    pt!(0, height - 1 - side),
+                    pt!(side, height - 1),
+                ],
+                GREY07,
+            );
         } else {
-            fb.draw_triangle(&[pt!(0, 0), pt!(side, 0), pt!(0, side)], BLACK);
+            ctx.fb
+                .draw_triangle(&[pt!(0, 0), pt!(side, 0), pt!(0, side)], BLACK);
         }
     }
 

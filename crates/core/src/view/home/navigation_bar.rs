@@ -1,18 +1,20 @@
-use std::path::{PathBuf, Path};
-use std::collections::BTreeSet;
-use fxhash::FxHashMap;
+use super::directories_bar::DirectoriesBar;
+use crate::colour::SEPARATOR_NORMAL;
+use crate::context::Context;
 use crate::device::CURRENT_DEVICE;
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData};
-use crate::view::{SMALL_BAR_HEIGHT, THICKNESS_MEDIUM};
+use crate::font::{NORMAL_STYLE, font_from_style};
+use crate::framebuffer::UpdateMode;
+use crate::geom::{Dir, Point, Rectangle};
+use crate::input::gestures::GestureEvent;
 use crate::unit::scale_by_dpi;
 use crate::view::filler::Filler;
-use super::directories_bar::DirectoriesBar;
-use crate::gesture::GestureEvent;
-use crate::color::SEPARATOR_NORMAL;
-use crate::context::Context;
-use crate::font::{Fonts, font_from_style, NORMAL_STYLE};
-use crate::geom::{Point, Rectangle, Dir};
+
+use crate::view::renderer::RenderQueue;
+use crate::view::{Bus, Event, Hub, ID_FEEDER, Id, RenderData, View};
+use crate::view::{SMALL_BAR_HEIGHT, THICKNESS_MEDIUM};
+use fxhash::FxHashMap;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug)]
 pub struct NavigationBar {
@@ -40,7 +42,13 @@ impl NavigationBar {
         self.children.clear();
     }
 
-    pub fn set_path<P: AsRef<Path>>(&mut self, path: P, path_dirs: &BTreeSet<PathBuf>, rq: &mut RenderQueue, context: &mut Context) {
+    pub fn set_path<P: AsRef<Path>>(
+        &mut self,
+        path: P,
+        path_dirs: &BTreeSet<PathBuf>,
+        rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) {
         let dpi = CURRENT_DEVICE.dpi;
         let thickness = scale_by_dpi(THICKNESS_MEDIUM, dpi) as i32;
         let min_height = scale_by_dpi(SMALL_BAR_HEIGHT, dpi) as i32 - thickness;
@@ -48,20 +56,28 @@ impl NavigationBar {
         let x_height = font.x_heights.0 as i32;
         let padding = min_height - x_height;
 
-        let first = self.children.first()
-                        .and_then(|child| child.downcast_ref::<DirectoriesBar>())
-                        .map(|dirs_bar| dirs_bar.path.clone())
-                        .unwrap_or_else(PathBuf::default);
-        let mut last = self.children.last()
-                           .and_then(|child| child.downcast_ref::<DirectoriesBar>())
-                           .map(|dirs_bar| dirs_bar.path.clone())
-                           .unwrap_or_else(PathBuf::default);
+        let first = self
+            .children
+            .first()
+            .and_then(|child| child.downcast_ref::<DirectoriesBar>())
+            .map(|dirs_bar| dirs_bar.path.clone())
+            .unwrap_or_else(PathBuf::default);
+        let mut last = self
+            .children
+            .last()
+            .and_then(|child| child.downcast_ref::<DirectoriesBar>())
+            .map(|dirs_bar| dirs_bar.path.clone())
+            .unwrap_or_else(PathBuf::default);
 
         // Remove the trailing children.
-        if let Some((leftovers_count, ancestor)) = last.ancestors().enumerate()
-                                                       .find(|(_, anc)| path.as_ref().starts_with(anc))
-                                                       .filter(|(n, _)| *n > 0) {
-            self.children.drain(self.children.len().saturating_sub(2*leftovers_count)..);
+        if let Some((leftovers_count, ancestor)) = last
+            .ancestors()
+            .enumerate()
+            .find(|(_, anc)| path.as_ref().starts_with(anc))
+            .filter(|(n, _)| *n > 0)
+        {
+            self.children
+                .drain(self.children.len().saturating_sub(2 * leftovers_count)..);
             last = ancestor.to_path_buf();
         }
 
@@ -116,25 +132,29 @@ impl NavigationBar {
 
                 levels += 1;
 
-                if self.children.get(index).map_or(true, |child| child.is::<Filler>()) {
-                    let rect = rect![self.rect.min.x, y_max - height,
-                                     self.rect.max.x, y_max];
-                    self.children.insert(index, Box::new(DirectoriesBar::new(rect, current)));
+                if self
+                    .children
+                    .get(index)
+                    .map_or(true, |child| child.is::<Filler>())
+                {
+                    let rect = rect![self.rect.min.x, y_max - height, self.rect.max.x, y_max];
+                    self.children
+                        .insert(index, Box::new(DirectoriesBar::new(rect, current)));
                     y_max -= height;
 
-                    let rect = rect![self.rect.min.x, y_max - thickness,
-                                     self.rect.max.x, y_max];
-                    self.children.insert(index, Box::new(Filler::new(rect, SEPARATOR_NORMAL)));
+                    let rect = rect![self.rect.min.x, y_max - thickness, self.rect.max.x, y_max];
+                    self.children
+                        .insert(index, Box::new(Filler::new(rect, SEPARATOR_NORMAL)));
                     y_max -= thickness;
                 } else {
-                    let rect = rect![self.rect.min.x, y_max - thickness,
-                                     self.rect.max.x, y_max];
-                    self.children.insert(index, Box::new(Filler::new(rect, SEPARATOR_NORMAL)));
+                    let rect = rect![self.rect.min.x, y_max - thickness, self.rect.max.x, y_max];
+                    self.children
+                        .insert(index, Box::new(Filler::new(rect, SEPARATOR_NORMAL)));
                     y_max -= thickness;
 
-                    let rect = rect![self.rect.min.x, y_max - height,
-                                     self.rect.max.x, y_max];
-                    self.children.insert(index, Box::new(DirectoriesBar::new(rect, current)));
+                    let rect = rect![self.rect.min.x, y_max - height, self.rect.max.x, y_max];
+                    self.children
+                        .insert(index, Box::new(DirectoriesBar::new(rect, current)));
                     y_max -= height;
                 }
             }
@@ -153,9 +173,14 @@ impl NavigationBar {
         self.children.drain(..index);
 
         if self.children.is_empty() {
-            let rect = rect![self.rect.min.x, self.rect.min.y,
-                             self.rect.max.x, self.rect.min.y + min_height];
-            self.children.push(Box::new(DirectoriesBar::new(rect, path.as_ref())));
+            let rect = rect![
+                self.rect.min.x,
+                self.rect.min.y,
+                self.rect.max.x,
+                self.rect.min.y + min_height
+            ];
+            self.children
+                .push(Box::new(DirectoriesBar::new(rect, path.as_ref())));
         }
 
         // Remove the extra separator.
@@ -175,14 +200,16 @@ impl NavigationBar {
 
         loop {
             if index % 2 == 0 {
-                let dirs_bar = self.children[index].downcast_mut::<DirectoriesBar>().unwrap();
+                let dirs_bar = self.children[index]
+                    .downcast_mut::<DirectoriesBar>()
+                    .unwrap();
                 dirs_bar.shift(pt!(0, y_shift));
                 if !last.starts_with(current) || !current.starts_with(&first) {
                     if current == path.as_ref() {
-                        dirs_bar.update_content(path_dirs, path.as_ref(), &mut context.fonts);
+                        dirs_bar.update_content(path_dirs, path.as_ref(), context);
                     } else {
                         if let Some(dirs) = dirs_from_path.remove(&current) {
-                            dirs_bar.update_content(&dirs, path.as_ref(), &mut context.fonts);
+                            dirs_bar.update_content(&dirs, path.as_ref(), context);
                         }
                     }
                 } else if current == last {
@@ -205,8 +232,13 @@ impl NavigationBar {
             index -= 1;
         }
 
-        self.rect.max.y = self.children[self.children.len()-1].rect().max.y;
-        rq.add(RenderData::new(self.id, self.rect, UpdateMode::Partial));
+        self.rect.max.y = self.children[self.children.len() - 1].rect().max.y;
+
+        RenderQueue::add_redraw_req(
+            rendering_ctx,
+            RenderData::new(self.id, self.rect, UpdateMode::Partial),
+        );
+
         self.path = path.as_ref().to_path_buf();
     }
 
@@ -221,16 +253,15 @@ impl NavigationBar {
         self.rect += delta;
     }
 
-
-    pub fn shrink(&mut self, delta_y: i32, fonts: &mut Fonts) -> i32 {
+    pub fn shrink(&mut self, delta_y: i32, ctx: &mut Context) -> i32 {
         let dpi = CURRENT_DEVICE.dpi;
         let thickness = scale_by_dpi(THICKNESS_MEDIUM, dpi) as i32;
         let min_height = scale_by_dpi(SMALL_BAR_HEIGHT, dpi) as i32 - thickness;
-        let bars_count = (self.children.len()+1)/2;
+        let bars_count = (self.children.len() + 1) / 2;
         let mut values = vec![0; bars_count];
 
         for (i, value) in values.iter_mut().enumerate().take(bars_count) {
-            *value = self.children[2*i].rect().height() as i32 - min_height;
+            *value = self.children[2 * i].rect().height() as i32 - min_height;
         }
 
         let sum: i32 = values.iter().sum();
@@ -240,7 +271,7 @@ impl NavigationBar {
         if sum > 0 {
             for i in (0..bars_count).rev() {
                 let local_delta_y = ((values[i] as f32 / sum as f32) * delta_y as f32) as i32;
-                y_shift += self.resize_child(2*i, local_delta_y, fonts);
+                y_shift += self.resize_child(2 * i, local_delta_y, ctx);
                 if y_shift <= delta_y {
                     break;
                 }
@@ -266,16 +297,16 @@ impl NavigationBar {
             y_shift -= dy;
         }
 
-        self.rect.max.y = self.children[self.children.len()-1].rect().max.y;
+        self.rect.max.y = self.children[self.children.len() - 1].rect().max.y;
 
         y_shift
     }
 
-    fn resize_child(&mut self, index: usize, delta_y: i32, fonts: &mut Fonts) -> i32 {
+    fn resize_child(&mut self, index: usize, delta_y: i32, ctx: &mut Context) -> i32 {
         let dpi = CURRENT_DEVICE.dpi;
         let thickness = scale_by_dpi(THICKNESS_MEDIUM, dpi) as i32;
         let min_height = scale_by_dpi(SMALL_BAR_HEIGHT, dpi) as i32 - thickness;
-        let font = font_from_style(fonts, &NORMAL_STYLE, dpi);
+        let font = font_from_style(&mut ctx.fonts, &NORMAL_STYLE, dpi);
 
         let rect = *self.children[index].rect();
         let delta_y_max = (self.vertical_limit - self.rect.max.y).max(0);
@@ -291,12 +322,14 @@ impl NavigationBar {
         self.children[index].rect_mut().max.y = y_max;
         let y_shift = y_max - rect.max.y;
 
-        let dirs_bar = self.children[index].downcast_mut::<DirectoriesBar>().unwrap();
+        let dirs_bar = self.children[index]
+            .downcast_mut::<DirectoriesBar>()
+            .unwrap();
         let dirs = dirs_bar.dirs();
-        dirs_bar.update_content(&dirs, self.path.as_ref(), fonts);
+        dirs_bar.update_content(&dirs, self.path.as_ref(), ctx);
 
         // Shift all the children after index.
-        for i in index+1..self.children.len() {
+        for i in index + 1..self.children.len() {
             if let Some(dirs_bar) = self.children[i].downcast_mut::<DirectoriesBar>() {
                 dirs_bar.shift(pt!(0, y_shift));
             } else {
@@ -305,7 +338,7 @@ impl NavigationBar {
         }
 
         // Move our own bottom edge.
-        self.rect.max.y = self.children[self.children.len()-1].rect().max.y;
+        self.rect.max.y = self.children[self.children.len() - 1].rect().max.y;
 
         y_shift
     }
@@ -313,33 +346,40 @@ impl NavigationBar {
 
 #[inline]
 fn guess_bar_size(dirs: &BTreeSet<PathBuf>) -> usize {
-    (dirs.iter().map(|dir| dir.as_os_str().len())
-         .sum::<usize>()/300).clamp(1, 4)
+    (dirs.iter().map(|dir| dir.as_os_str().len()).sum::<usize>() / 300).clamp(1, 4)
 }
 
 impl View for NavigationBar {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, _rq: &mut RenderQueue, context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        bus: &mut Bus,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) -> bool {
         match *evt {
-            Event::Gesture(GestureEvent::Swipe { dir, start, end, .. }) if self.rect.includes(start) || self.rect.includes(end) => {
+            Event::Gesture(GestureEvent::Swipe {
+                dir, start, end, ..
+            }) if self.rect.includes(start) || self.rect.includes(end) => {
                 match dir {
                     Dir::North | Dir::South => {
                         let pt = if dir == Dir::North { end } else { start };
-                        if let Some(index) = self.children.iter().position(|child| child.is::<DirectoriesBar>() && child.rect().includes(pt)) {
+                        if let Some(index) = self.children.iter().position(|child| {
+                            child.is::<DirectoriesBar>() && child.rect().includes(pt)
+                        }) {
                             // Move the bottom edge of the child by end.y - start.y.
                             // Shift all the children after the child.
-                            let y_shift = self.resize_child(index, end.y - start.y, &mut context.fonts);
+                            let y_shift = self.resize_child(index, end.y - start.y, context);
                             bus.push_back(Event::NavigationBarResized(y_shift));
                         }
                         true
-                    },
+                    }
                     _ => false,
                 }
-            },
+            }
             _ => false,
         }
-    }
-
-    fn render(&self, _fb: &mut dyn Framebuffer, _rect: Rectangle, _fonts: &mut Fonts) {
     }
 
     fn rect(&self) -> &Rectangle {

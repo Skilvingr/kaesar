@@ -1,11 +1,13 @@
-use crate::device::CURRENT_DEVICE;
-use crate::font::{Fonts, font_from_style, NORMAL_STYLE};
-use super::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, Align};
-use crate::gesture::GestureEvent;
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::geom::Rectangle;
-use crate::color::TEXT_NORMAL;
+use crate::view::renderer::RenderQueue;
+
+use super::{Align, Bus, Event, Hub, ID_FEEDER, Id, RenderData, View};
+use crate::colour::TEXT_NORMAL;
 use crate::context::Context;
+use crate::device::CURRENT_DEVICE;
+use crate::font::{NORMAL_STYLE, font_from_style};
+use crate::framebuffer::UpdateMode;
+use crate::geom::Rectangle;
+use crate::input::gestures::GestureEvent;
 
 pub struct Label {
     id: Id,
@@ -40,39 +42,52 @@ impl Label {
         self
     }
 
-    pub fn update(&mut self, text: &str, rq: &mut RenderQueue) {
+    pub fn update(&mut self, text: &str, rendering_ctx: &mut Option<RenderQueue>) {
         if self.text != text {
             self.text = text.to_string();
-            rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+
+            RenderQueue::add_redraw_req(
+                rendering_ctx,
+                RenderData::new(self.id, self.rect, UpdateMode::Gui),
+            );
         }
     }
 }
 
 impl View for Label {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, _rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        bus: &mut Bus,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
                 if let Some(event) = self.event.clone() {
                     bus.push_back(event);
                 }
                 true
-            },
-            Event::Gesture(GestureEvent::HoldFingerShort(center, _)) if self.rect.includes(center) => {
+            }
+            Event::Gesture(GestureEvent::HoldFingerShort(center, _))
+                if self.rect.includes(center) =>
+            {
                 if let Some(event) = self.hold_event.clone() {
                     bus.push_back(event);
                 }
                 true
-            },
+            }
             _ => false,
         }
     }
 
-    fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, fonts: &mut Fonts) {
+    fn render_view(&self, _rect: &Rectangle, ctx: &mut Context) {
         let dpi = CURRENT_DEVICE.dpi;
 
-        fb.draw_rectangle(&self.rect, TEXT_NORMAL[0]);
+        ctx.fb.draw_rectangle(&self.rect, TEXT_NORMAL[0]);
 
-        let font = font_from_style(fonts, &NORMAL_STYLE, dpi);
+        let font = font_from_style(&mut ctx.fonts, &NORMAL_STYLE, dpi);
         let x_height = font.x_heights.0 as i32;
         let padding = font.em() as i32;
         let max_width = self.rect.width() as i32 - padding;
@@ -83,11 +98,17 @@ impl View for Label {
         let dy = (self.rect.height() as i32 - x_height) / 2;
         let pt = pt!(self.rect.min.x + dx, self.rect.max.y - dy);
 
-        font.render(fb, TEXT_NORMAL[1], &plan, pt);
+        font.render(ctx.fb.as_mut(), TEXT_NORMAL[1], &plan, pt);
     }
 
-    fn resize(&mut self, rect: Rectangle, _hub: &Hub, _rq: &mut RenderQueue, _context: &mut Context) {
-        if let Some(Event::ToggleNear(_, ref mut event_rect)) = self.event.as_mut() {
+    fn resize(
+        &mut self,
+        rect: Rectangle,
+        _hub: &Hub,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) {
+        if let Some(Event::ToggleNear(_, event_rect)) = self.event.as_mut() {
             *event_rect = rect;
         }
         self.rect = rect;

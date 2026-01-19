@@ -6,6 +6,7 @@
 /libs
 /bin
 /Settings.toml
+/.zed/
 /.metadata.json
 /.reading-states
 /.fat32-epoch
@@ -16,6 +17,13 @@
 /dictionaries
 /dist
 /bundle
-/plato-*.zip
 /thirdparty/*/*
 !/thirdparty/*/*kobo*
+
+emulator_sysroot/.trash/
+emulator_sysroot/.reading-states/
+emulator_sysroot/.thumbnail-previews/
+emulator_sysroot/.fat32-epoch
+emulator_sysroot/**/*.json
+emulator_sysroot/**/*.png
+emulator_sysroot/*.pdf

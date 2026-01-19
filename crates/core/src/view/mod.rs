@@ -9,61 +9,63 @@
 //! be written to the main event channel and will be sent to every leaf in one of the next loop
 //! iterations.
 
-pub mod common;
-pub mod filler;
-pub mod image;
-pub mod icon;
-pub mod label;
+pub mod battery;
 pub mod button;
-pub mod rounded_button;
-pub mod slider;
-pub mod input_field;
-pub mod page_label;
-pub mod named_input;
-pub mod labeled_icon;
-pub mod top_bar;
-pub mod search_bar;
+pub mod calculator;
+pub mod clock;
+pub mod common;
 pub mod dialog;
-pub mod notification;
-pub mod intermission;
+pub mod dictionary;
+pub mod filler;
 pub mod frontlight;
-pub mod presets_list;
-pub mod preset;
+pub mod home;
+pub mod icon;
+pub mod image;
+pub mod input_field;
+pub mod intermission;
+pub mod key;
+pub mod keyboard;
+pub mod label;
+pub mod labeled_icon;
 pub mod menu;
 pub mod menu_entry;
-pub mod clock;
-pub mod battery;
-pub mod keyboard;
-pub mod key;
-pub mod home;
+pub mod named_input;
+pub mod notification;
+pub mod page_label;
+pub mod preset;
+pub mod presets_list;
 pub mod reader;
-pub mod dictionary;
-pub mod calculator;
-pub mod sketch;
-pub mod touch_events;
+pub mod renderer;
 pub mod rotation_values;
+pub mod rounded_button;
+pub mod search_bar;
+pub mod sketch;
+pub mod slider;
+pub mod top_bar;
+pub mod touch_events;
 
-use std::ops::{Deref, DerefMut};
-use std::time::{Instant, Duration};
-use std::path::PathBuf;
-use std::sync::mpsc::Sender;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::collections::VecDeque;
-use std::fmt::{self, Debug};
-use fxhash::FxHashMap;
-use downcast_rs::{Downcast, impl_downcast};
-use crate::font::Fonts;
-use crate::color::Color;
-use crate::document::{Location, TextLocation};
-use crate::settings::{ButtonScheme, FirstColumn, SecondColumn, RotationLock};
-use crate::metadata::{Info, ZoomMode, ScrollMode, SortMethod, TextAlign, SimpleStatus, PageScheme, Margin};
-use crate::geom::{LinearDir, CycleDir, Rectangle, Boundary};
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::input::{DeviceEvent, FingerStatus};
-use crate::gesture::GestureEvent;
 use self::calculator::LineOrigin;
 use self::key::KeyKind;
+use crate::colour::Colour;
 use crate::context::Context;
+use crate::document::{Location, TextLocation};
+use crate::framebuffer::UpdateMode;
+use crate::geom::{Boundary, CycleDir, LinearDir, Rectangle};
+use crate::input::gestures::GestureEvent;
+use crate::input::{DeviceEvent, FingerStatus};
+use crate::metadata::{
+    Info, Margin, PageScheme, ScrollMode, SimpleStatus, SortMethod, TextAlign, ZoomMode,
+};
+use crate::settings::{ButtonScheme, FirstColumn, RotationLock, SecondColumn};
+use crate::view::renderer::RenderData;
+use crate::view::renderer::RenderQueue;
+use downcast_rs::{Downcast, impl_downcast};
+use std::collections::VecDeque;
+use std::fmt::{self, Debug};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 // Border thicknesses in pixels, at 300 DPI.
 pub const THICKNESS_SMALL: f32 = 1.0;
@@ -85,9 +87,19 @@ pub const CLOSE_IGNITION_DELAY: Duration = Duration::from_millis(150);
 pub type Bus = VecDeque<Event>;
 pub type Hub = Sender<Event>;
 
-pub trait View: Downcast {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, bus: &mut Bus, rq: &mut RenderQueue, context: &mut Context) -> bool;
-    fn render(&self, fb: &mut dyn Framebuffer, rect: Rectangle, fonts: &mut Fonts);
+pub trait View: Downcast + Send + Sync {
+    /// Return true in order to capture the event.
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        hub: &Hub,
+        bus: &mut Bus,
+        rendering_rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) -> bool;
+    //fn render(&self, fb: &mut dyn Framebuffer, rect: Rectangle, fonts: &mut Fonts) {}
+    fn render_view(&self, _rect: &Rectangle, _ctx: &mut Context) {}
+
     fn rect(&self) -> &Rectangle;
     fn rect_mut(&mut self) -> &mut Rectangle;
     fn children(&self) -> &Vec<Box<dyn View>>;
@@ -98,7 +110,13 @@ pub trait View: Downcast {
         *self.rect()
     }
 
-    fn resize(&mut self, rect: Rectangle, _hub: &Hub, _rq: &mut RenderQueue, _context: &mut Context) {
+    fn resize(
+        &mut self,
+        rect: Rectangle,
+        _hub: &Hub,
+        _rq: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) {
         *self.rect_mut() = rect;
     }
 
@@ -142,11 +160,17 @@ impl Debug for Box<dyn View> {
 // We start delivering events from the highest z-level to prevent views from capturing
 // gestures that occurred in higher views.
 // The consistency must also be ensured by the views: popups, for example, need to
-// capture any tap gesture with a touch point inside their rectangle.
+// capture any tap gesture with a touch point inside their rectangle, by returning `true`.
 // A child can send events to the main channel through the *hub* or communicate with its parent through the *bus*.
 // A view that wants to render can write to the rendering queue.
-pub fn handle_event(view: &mut dyn View, evt: &Event, hub: &Hub, parent_bus: &mut Bus,
-                    rq: &mut RenderQueue, context: &mut Context) -> bool {
+pub fn handle_event(
+    view: &mut dyn View,
+    evt: &Event,
+    hub: &Hub,
+    parent_bus: &mut Bus,
+    rendering_ctx: &mut Option<RenderQueue>,
+    context: &mut Context,
+) -> bool {
     if view.len() > 0 {
         let mut captured = false;
 
@@ -157,7 +181,14 @@ pub fn handle_event(view: &mut dyn View, evt: &Event, hub: &Hub, parent_bus: &mu
         let mut child_bus: Bus = VecDeque::with_capacity(1);
 
         for i in (0..view.len()).rev() {
-            if handle_event(view.child_mut(i), evt, hub, &mut child_bus, rq, context) {
+            if handle_event(
+                view.child_mut(i),
+                evt,
+                hub,
+                &mut child_bus,
+                rendering_ctx,
+                context,
+            ) {
                 captured = true;
                 break;
             }
@@ -165,127 +196,16 @@ pub fn handle_event(view: &mut dyn View, evt: &Event, hub: &Hub, parent_bus: &mu
 
         let mut temp_bus: Bus = VecDeque::with_capacity(1);
 
-        child_bus.retain(|child_evt| !view.handle_event(child_evt, hub, &mut temp_bus, rq, context));
+        child_bus.retain(|child_evt| {
+            !view.handle_event(child_evt, hub, &mut temp_bus, rendering_ctx, context)
+        });
 
         parent_bus.append(&mut child_bus);
         parent_bus.append(&mut temp_bus);
 
-        captured || view.handle_event(evt, hub, parent_bus, rq, context)
+        captured || view.handle_event(evt, hub, parent_bus, rendering_ctx, context)
     } else {
-        view.handle_event(evt, hub, parent_bus, rq, context)
-    }
-}
-
-// We render from bottom to top. For a view to render it has to either appear in `ids` or intersect
-// one of the rectangles in `bgs`. When we're about to render a view, if `wait` is true, we'll wait
-// for all the updates in `updating` that intersect with the view.
-pub fn render(view: &dyn View, wait: bool, ids: &FxHashMap<Id, Vec<Rectangle>>, rects: &mut Vec<Rectangle>,
-              bgs: &mut Vec<Rectangle>, fb: &mut dyn Framebuffer, fonts: &mut Fonts, updating: &mut Vec<UpdateData>) {
-    let mut render_rects = Vec::new();
-
-    if view.len() == 0 || view.is_background() {
-        for rect in ids.get(&view.id()).cloned().into_iter().flatten()
-                       .chain(rects.iter().filter_map(|r| r.intersection(view.rect())))
-                       .chain(bgs.iter().filter_map(|r| r.intersection(view.rect()))) {
-            let render_rect = view.render_rect(&rect);
-
-            if wait {
-                updating.retain(|update| {
-                    let overlaps = render_rect.overlaps(&update.rect);
-                    if overlaps && !update.has_completed() {
-                        fb.wait(update.token)
-                          .map_err(|e| eprintln!("Can't wait for {}, {}: {:#}",
-                                                 update.token, update.rect, e))
-                          .ok();
-                    }
-                    !overlaps
-                });
-            }
-
-            view.render(fb, rect, fonts);
-            render_rects.push(render_rect);
-
-            // Most views can't render a subrectangle of themselves.
-            if *view.rect() == render_rect {
-                break;
-            }
-        }
-    } else {
-        bgs.extend(ids.get(&view.id()).cloned().into_iter().flatten());
-    }
-
-    // Merge the contiguous zones to avoid having to schedule lots of small frambuffer updates.
-    for rect in render_rects.into_iter() {
-        if rects.is_empty() {
-            rects.push(rect);
-        } else {
-            if let Some(last) = rects.last_mut() {
-                if rect.extends(last) {
-                    last.absorb(&rect);
-                    let mut i = rects.len();
-                    while i > 1 && rects[i-1].extends(&rects[i-2]) {
-                        if let Some(rect) = rects.pop() {
-                            if let Some(last) = rects.last_mut() {
-                                last.absorb(&rect);
-                            }
-                        }
-                        i -= 1;
-                    }
-                } else {
-                    let mut i = rects.len();
-                    while i > 0 && !rects[i-1].contains(&rect) {
-                        i -= 1;
-                    }
-                    if i == 0 {
-                        rects.push(rect);
-                    }
-                }
-            }
-        }
-    }
-
-    for i in 0..view.len() {
-        render(view.child(i), wait, ids, rects, bgs, fb, fonts, updating);
-    }
-}
-
-#[inline]
-pub fn process_render_queue(view: &dyn View, rq: &mut RenderQueue, context: &mut Context, updating: &mut Vec<UpdateData>) {
-    for ((mode, wait), pairs) in rq.drain() {
-        let mut ids = FxHashMap::default();
-        let mut rects = Vec::new();
-        let mut bgs = Vec::new();
-
-        for (id, rect) in pairs.into_iter().rev() {
-            if let Some(id) = id {
-                ids.entry(id).or_insert_with(Vec::new).push(rect);
-            } else {
-                bgs.push(rect);
-            }
-        }
-
-        render(view, wait, &ids, &mut rects, &mut bgs,
-               context.fb.as_mut(), &mut context.fonts, updating);
-
-        for rect in rects {
-            match context.fb.update(&rect, mode) {
-                Ok(token) => { updating.push(UpdateData { token, rect, time: Instant::now()}); },
-                Err(err) => { eprintln!("Can't update {}: {:#}.", rect, err); },
-            }
-        }
-    }
-}
-
-#[inline]
-pub fn wait_for_all(updating: &mut Vec<UpdateData>, context: &mut Context) {
-    for update in updating.drain(..) {
-        if update.has_completed() {
-            continue;
-        }
-        context.fb.wait(update.token)
-               .map_err(|e| eprintln!("Can't wait for {}, {}: {:#}",
-                                      update.token, update.rect, e))
-               .ok();
+        view.handle_event(evt, hub, parent_bus, rendering_ctx, context)
     }
 }
 
@@ -351,7 +271,6 @@ pub enum Event {
     Scroll(i32),
     Save,
     Guess,
-    CheckBattery,
     SetWifi(bool),
     MightSuspend,
     PrepareSuspend,
@@ -361,6 +280,7 @@ pub enum Event {
     Validate,
     Cancel,
     Reseed,
+    SshUp(&'static str),
     Back,
     Quit,
     WakeUp,
@@ -370,10 +290,7 @@ pub enum Event {
 pub enum AppCmd {
     Sketch,
     Calculator,
-    Dictionary {
-        query: String,
-        language: String,
-    },
+    Dictionary { query: String, language: String },
     TouchEvents,
     RotationValues,
 }
@@ -399,7 +316,7 @@ pub enum ViewId {
     FontFamilyMenu,
     MarginWidthMenu,
     ContrastExponentMenu,
-    ContrastGrayMenu,
+    ContrastGreyMenu,
     LineHeightMenu,
     DirectoryMenu,
     BookMenu,
@@ -444,7 +361,7 @@ pub enum SliderId {
     LightIntensity,
     LightWarmth,
     ContrastExponent,
-    ContrastGray,
+    ContrastGrey,
 }
 
 impl SliderId {
@@ -454,7 +371,7 @@ impl SliderId {
             SliderId::LightWarmth => "Warmth".to_string(),
             SliderId::FontSize => "Font Size".to_string(),
             SliderId::ContrastExponent => "Contrast Exponent".to_string(),
-            SliderId::ContrastGray => "Contrast Gray".to_string(),
+            SliderId::ContrastGrey => "Contrast Grey".to_string(),
         }
     }
 }
@@ -556,7 +473,7 @@ pub enum EntryId {
     SetMarginWidth(i32),
     SetLineHeight(i32),
     SetContrastExponent(i32),
-    SetContrastGray(i32),
+    SetContrastGrey(i32),
     SetRotationLock(Option<RotationLock>),
     SetSearchTarget(Option<String>),
     SetInputText(ViewId, String),
@@ -564,17 +481,20 @@ pub enum EntryId {
     ToggleShowHidden,
     ToggleFuzzy,
     ToggleInverted,
+    ToggleDocumentInverted,
     ToggleDithered,
     ToggleWifi,
+    ToggleSSH,
     Rotate(i8),
     Launch(AppCmd),
     SetPenSize(i32),
-    SetPenColor(Color),
+    SetPenColor(Colour),
     TogglePenDynamism,
     ReloadDictionaries,
     New,
     Refresh,
     TakeScreenshot,
+    RestartApp,
     Reboot,
     Quit,
 }
@@ -586,11 +506,11 @@ impl EntryKind {
 
     pub fn text(&self) -> &str {
         match *self {
-            EntryKind::Message(ref s, ..) |
-            EntryKind::Command(ref s, ..) |
-            EntryKind::CheckBox(ref s, ..) |
-            EntryKind::RadioButton(ref s, ..) |
-            EntryKind::SubMenu(ref s, ..) => s,
+            EntryKind::Message(ref s, ..)
+            | EntryKind::Command(ref s, ..)
+            | EntryKind::CheckBox(ref s, ..)
+            | EntryKind::RadioButton(ref s, ..)
+            | EntryKind::SubMenu(ref s, ..) => s,
             EntryKind::More(..) => "More",
             _ => "",
         }
@@ -598,103 +518,18 @@ impl EntryKind {
 
     pub fn get(&self) -> Option<bool> {
         match *self {
-            EntryKind::CheckBox(_, _, v) |
-            EntryKind::RadioButton(_, _, v) => Some(v),
+            EntryKind::CheckBox(_, _, v) | EntryKind::RadioButton(_, _, v) => Some(v),
             _ => None,
         }
     }
 
     pub fn set(&mut self, value: bool) {
         match *self {
-            EntryKind::CheckBox(_, _, ref mut v) |
-            EntryKind::RadioButton(_, _, ref mut v) => *v = value,
+            EntryKind::CheckBox(_, _, ref mut v) | EntryKind::RadioButton(_, _, ref mut v) => {
+                *v = value
+            }
             _ => (),
         }
-    }
-}
-
-pub struct RenderData {
-    pub id: Option<Id>,
-    pub rect: Rectangle,
-    pub mode: UpdateMode,
-    pub wait: bool,
-}
-
-impl RenderData {
-    pub fn new(id: Id, rect: Rectangle, mode: UpdateMode) -> RenderData {
-        RenderData {
-            id: Some(id),
-            rect,
-            mode,
-            wait: true,
-        }
-    }
-
-    pub fn no_wait(id: Id, rect: Rectangle, mode: UpdateMode) -> RenderData {
-        RenderData {
-            id: Some(id),
-            rect,
-            mode,
-            wait: false,
-        }
-    }
-
-    pub fn expose(rect: Rectangle, mode: UpdateMode) -> RenderData {
-        RenderData {
-            id: None,
-            rect,
-            mode,
-            wait: true,
-        }
-    }
-}
-
-pub struct UpdateData {
-    pub token: u32,
-    pub time: Instant,
-    pub rect: Rectangle,
-}
-
-pub const MAX_UPDATE_DELAY: Duration = Duration::from_millis(600);
-
-impl UpdateData {
-    pub fn has_completed(&self) -> bool {
-        self.time.elapsed() >= MAX_UPDATE_DELAY
-    }
-}
-
-type RQ = FxHashMap<(UpdateMode, bool), Vec<(Option<Id>, Rectangle)>>;
-pub struct RenderQueue(RQ);
-
-impl RenderQueue {
-    pub fn new() -> RenderQueue {
-        RenderQueue(FxHashMap::default())
-    }
-
-    pub fn add(&mut self, data: RenderData) {
-        self.entry((data.mode, data.wait)).or_insert_with(|| {
-            Vec::new()
-        }).push((data.id, data.rect));
-    }
-}
-
-impl Default for RenderQueue {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Deref for RenderQueue {
-    type Target = RQ;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for RenderQueue {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 

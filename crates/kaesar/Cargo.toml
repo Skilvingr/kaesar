@@ -1,0 +1,15 @@
+[package]
+authors = ["Skilfingr <skilvingr@gmail.com>"]
+name = "kaesar"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+sim = []
+
+[[bin]]
+name = "kaesar"
+path = "src/main.rs"
+
+[dependencies]
+kaesar-core = { path = "../core" }

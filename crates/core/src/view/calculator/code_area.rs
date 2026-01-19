@@ -1,14 +1,14 @@
-use crate::device::CURRENT_DEVICE;
-use crate::font::Fonts;
-use crate::input::{DeviceEvent, ButtonCode, ButtonStatus};
-use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue};
+use crate::view::renderer::RenderQueue;
+
 use super::{Line, LineOrigin};
-use crate::gesture::GestureEvent;
-use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::unit::mm_to_px;
-use crate::geom::{Rectangle, Dir, CycleDir};
-use crate::color::TEXT_NORMAL;
+use crate::colour::TEXT_NORMAL;
 use crate::context::Context;
+use crate::device::CURRENT_DEVICE;
+use crate::geom::{CycleDir, Dir, Rectangle};
+use crate::input::gestures::GestureEvent;
+use crate::input::{ButtonCode, ButtonStatus, DeviceEvent};
+use crate::unit::mm_to_px;
+use crate::view::{Bus, Event, Hub, ID_FEEDER, Id, View};
 
 pub struct CodeArea {
     id: Id,
@@ -31,7 +31,13 @@ impl CodeArea {
         }
     }
 
-    pub fn append(&mut self, line: Line, added_lines: i32, screen_lines: i32, context: &mut Context) {
+    pub fn append(
+        &mut self,
+        line: Line,
+        added_lines: i32,
+        screen_lines: i32,
+        context: &mut Context,
+    ) {
         let dpi = CURRENT_DEVICE.dpi;
         let font = &mut context.fonts.monospace.regular;
         font.set_size((64.0 * self.font_size) as u32, dpi);
@@ -39,19 +45,25 @@ impl CodeArea {
         let margin_width_px = mm_to_px(self.margin_width as f32, dpi) as i32;
         let min_y = self.rect.min.y + margin_width_px + screen_lines * line_height;
 
-        let rect = rect![self.rect.min.x + margin_width_px,
-                         min_y,
-                         self.rect.max.x - margin_width_px,
-                         min_y + added_lines * line_height];
+        let _rect = rect![
+            self.rect.min.x + margin_width_px,
+            min_y,
+            self.rect.max.x - margin_width_px,
+            min_y + added_lines * line_height
+        ];
         self.data.push(line);
-        self.render(context.fb.as_mut(), rect, &mut context.fonts);
-        context.fb.update(&rect, UpdateMode::Gui).ok();
+        // // FIXME: why aren't these two blocks delayed through a RenderQueue::add_if_some?
+        // let mut fb = context.fb.lock().unwrap();
+        // self.render(&mut *fb, rect, &mut context.fonts);
+        // fb.update(&rect, UpdateMode::Gui).ok();
     }
 
-    pub fn set_data(&mut self, data: Vec<Line>, context: &mut Context) {
+    pub fn set_data(&mut self, data: Vec<Line>, _context: &mut Context) {
         self.data = data;
-        self.render(context.fb.as_mut(), self.rect, &mut context.fonts);
-        context.fb.update(&self.rect, UpdateMode::Gui).ok();
+
+        // let mut fb = context.fb.lock().unwrap();
+        // self.render(&mut *fb, self.rect, &mut context.fonts);
+        // fb.update(&self.rect, UpdateMode::Gui).ok();
     }
 
     pub fn update(&mut self, font_size: f32, margin_width: i32) {
@@ -61,24 +73,37 @@ impl CodeArea {
 }
 
 impl View for CodeArea {
-    fn handle_event(&mut self, evt: &Event, _hub: &Hub, bus: &mut Bus, _rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        _hub: &Hub,
+        bus: &mut Bus,
+        _rendering_ctx: &mut Option<RenderQueue>,
+        _context: &mut Context,
+    ) -> bool {
         match *evt {
-            Event::Gesture(GestureEvent::Swipe { dir, start, end, .. }) if self.rect.includes(start) => {
+            Event::Gesture(GestureEvent::Swipe {
+                dir, start, end, ..
+            }) if self.rect.includes(start) => {
                 match dir {
                     Dir::South | Dir::North => bus.push_back(Event::Scroll(start.y - end.y)),
                     Dir::West => bus.push_back(Event::Page(CycleDir::Next)),
                     Dir::East => bus.push_back(Event::Page(CycleDir::Previous)),
                 }
                 true
-            },
-            Event::Device(DeviceEvent::Button { code, status: ButtonStatus::Pressed, .. }) => {
+            }
+            Event::Device(DeviceEvent::Button {
+                code,
+                status: ButtonStatus::Pressed,
+                ..
+            }) => {
                 match code {
                     ButtonCode::Backward => bus.push_back(Event::Page(CycleDir::Previous)),
                     ButtonCode::Forward => bus.push_back(Event::Page(CycleDir::Next)),
                     _ => (),
                 }
                 true
-            },
+            }
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
                 let middle_x = (self.rect.min.x + self.rect.max.x) / 2;
                 if center.x < middle_x {
@@ -87,19 +112,19 @@ impl View for CodeArea {
                     bus.push_back(Event::Page(CycleDir::Next));
                 }
                 true
-            },
+            }
             _ => false,
         }
     }
 
-    fn render(&self, fb: &mut dyn Framebuffer, rect: Rectangle, fonts: &mut Fonts) {
+    fn render_view(&self, rect: &Rectangle, ctx: &mut Context) {
         let dpi = CURRENT_DEVICE.dpi;
 
         if let Some(irect) = self.rect.intersection(&rect) {
-            fb.draw_rectangle(&irect, TEXT_NORMAL[0]);
+            ctx.fb.draw_rectangle(&irect, TEXT_NORMAL[0]);
         }
 
-        let font = &mut fonts.monospace.regular;
+        let font = &mut ctx.fonts.monospace.regular;
         font.set_size((64.0 * self.font_size) as u32, dpi);
         let line_height = font.ascender() - font.descender();
         let char_width = font.plan(" ", None, None).width;
@@ -110,9 +135,9 @@ impl View for CodeArea {
 
         for line in &self.data {
             let font = match line.origin {
-                LineOrigin::Input => &mut fonts.monospace.bold,
-                LineOrigin::Output => &mut fonts.monospace.regular,
-                LineOrigin::Error => &mut fonts.monospace.italic,
+                LineOrigin::Input => &mut ctx.fonts.monospace.bold,
+                LineOrigin::Output => &mut ctx.fonts.monospace.regular,
+                LineOrigin::Error => &mut ctx.fonts.monospace.italic,
             };
 
             font.set_size((64.0 * self.font_size) as u32, dpi);
@@ -124,7 +149,11 @@ impl View for CodeArea {
                 }
                 if y >= rect.min.y {
                     let plan = font.plan(&c.to_string(), None, None);
-                    font.render(fb, TEXT_NORMAL[1], &plan, pt!(x, y));
+                    if ctx.settings.multithreaded_renderer {
+                        font.render(ctx.fb.as_mut(), TEXT_NORMAL[1], &plan, pt!(x, y));
+                    } else {
+                        font.render(ctx.fb.as_mut(), TEXT_NORMAL[1], &plan, pt!(x, y));
+                    }
                 }
                 x += char_width;
             }
@@ -135,8 +164,7 @@ impl View for CodeArea {
     }
 
     fn render_rect(&self, rect: &Rectangle) -> Rectangle {
-        rect.intersection(&self.rect)
-            .unwrap_or(self.rect)
+        rect.intersection(&self.rect).unwrap_or(self.rect)
     }
 
     fn rect(&self) -> &Rectangle {

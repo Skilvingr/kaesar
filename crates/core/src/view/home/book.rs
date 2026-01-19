@@ -1,19 +1,21 @@
-use std::path::PathBuf;
+use crate::colour::{BLACK, READING_PROGRESS, WHITE};
+use crate::colour::{TEXT_INVERTED_HARD, TEXT_NORMAL};
+use crate::context::Context;
 use crate::device::CURRENT_DEVICE;
+use crate::document::pdf::PdfOpener;
+use crate::document::{Document, HumanSize, Location};
+use crate::font::font_from_style;
+use crate::font::{MD_AUTHOR, MD_KIND, MD_SIZE, MD_TITLE, MD_YEAR};
 use crate::framebuffer::{Framebuffer, UpdateMode};
-use crate::view::{View, Event, Hub, Bus, Id, ID_FEEDER, RenderQueue, RenderData, THICKNESS_SMALL};
-use crate::font::{MD_TITLE, MD_AUTHOR, MD_YEAR, MD_KIND, MD_SIZE};
-use crate::color::{BLACK, WHITE, READING_PROGRESS};
-use crate::color::{TEXT_NORMAL, TEXT_INVERTED_HARD};
-use crate::gesture::GestureEvent;
+use crate::geom::{BorderSpec, CornerSpec, Rectangle, halves};
+use crate::input::gestures::GestureEvent;
 use crate::metadata::{Info, Status};
 use crate::settings::{FirstColumn, SecondColumn};
 use crate::unit::scale_by_dpi;
-use crate::document::{HumanSize, Location, Document};
-use crate::document::pdf::PdfOpener;
-use crate::font::{Fonts, font_from_style};
-use crate::geom::{Rectangle, CornerSpec, BorderSpec, halves};
-use crate::context::Context;
+
+use crate::view::renderer::RenderQueue;
+use crate::view::{Bus, Event, Hub, ID_FEEDER, Id, RenderData, THICKNESS_SMALL, View};
+use std::path::PathBuf;
 
 const PROGRESS_HEIGHT: f32 = 13.0;
 
@@ -30,8 +32,14 @@ pub struct Book {
 }
 
 impl Book {
-    pub fn new(rect: Rectangle, info: Info, index: usize,
-               first_column: FirstColumn, second_column: SecondColumn, preview_path: Option<PathBuf>) -> Book {
+    pub fn new(
+        rect: Rectangle,
+        info: Info,
+        index: usize,
+        first_column: FirstColumn,
+        second_column: SecondColumn,
+        preview_path: Option<PathBuf>,
+    ) -> Book {
         Book {
             id: ID_FEEDER.next(),
             rect,
@@ -47,42 +55,68 @@ impl Book {
 }
 
 impl View for Book {
-    fn handle_event(&mut self, evt: &Event, hub: &Hub, bus: &mut Bus, rq: &mut RenderQueue, _context: &mut Context) -> bool {
+    fn handle_event(
+        &mut self,
+        evt: &Event,
+        hub: &Hub,
+        bus: &mut Bus,
+        rendering_ctx: &mut Option<RenderQueue>,
+        context: &mut Context,
+    ) -> bool {
         match *evt {
             Event::Gesture(GestureEvent::Tap(center)) if self.rect.includes(center) => {
                 self.active = true;
-                rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+                RenderQueue::add_redraw_req(
+                    rendering_ctx,
+                    RenderData::new(self.id, self.rect, UpdateMode::Gui),
+                );
                 hub.send(Event::Open(Box::new(self.info.clone()))).ok();
                 true
-            },
-            Event::Gesture(GestureEvent::HoldFingerShort(center, ..)) if self.rect.includes(center) => {
+            }
+            Event::Gesture(GestureEvent::HoldFingerShort(center, ..))
+                if self.rect.includes(center) =>
+            {
                 let pt = pt!(center.x, self.rect.center().y);
                 bus.push_back(Event::ToggleBookMenu(Rectangle::from_point(pt), self.index));
                 true
-            },
+            }
             Event::RefreshBookPreview(ref path, ref preview_path) => {
+                // A cover has been loaded correctly. Set this book able to display it.
+                self.info.display_cover = true;
+                context.library.apply(|_, _info| {
+                    if &_info.file.path == path {
+                        _info.display_cover = true;
+                    }
+                });
+
                 if self.info.file.path == *path {
                     self.preview_path = preview_path.clone();
-                    rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+                    RenderQueue::add_redraw_req(
+                        rendering_ctx,
+                        RenderData::new(self.id, self.rect, UpdateMode::Gui),
+                    );
                     true
                 } else {
                     false
                 }
-            },
+            }
             Event::Invalid(ref path) => {
                 if self.info.file.path == *path {
                     self.active = false;
-                    rq.add(RenderData::new(self.id, self.rect, UpdateMode::Gui));
+                    RenderQueue::add_redraw_req(
+                        rendering_ctx,
+                        RenderData::new(self.id, self.rect, UpdateMode::Gui),
+                    );
                     true
                 } else {
                     false
                 }
-            },
+            }
             _ => false,
         }
     }
 
-    fn render(&self, fb: &mut dyn Framebuffer, _rect: Rectangle, fonts: &mut Fonts) {
+    fn render_view(&self, _rect: &Rectangle, ctx: &mut Context) {
         let dpi = CURRENT_DEVICE.dpi;
 
         let scheme = if self.active {
@@ -91,14 +125,18 @@ impl View for Book {
             TEXT_NORMAL
         };
 
-        fb.draw_rectangle(&self.rect, scheme[0]);
+        ctx.fb.draw_rectangle(&self.rect, scheme[0]);
 
         let (title, author) = if self.first_column == FirstColumn::TitleAndAuthor {
             (self.info.title(), self.info.author.as_str())
         } else {
-            let filename = self.info.file.path.file_stem()
-                               .map(|v| v.to_string_lossy().into_owned())
-                               .unwrap_or_default();
+            let filename = self
+                .info
+                .file
+                .path
+                .file_stem()
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_default();
             (filename, "")
         };
 
@@ -106,9 +144,13 @@ impl View for Book {
         let file_info = &self.info.file;
 
         let (x_height, padding, baseline) = {
-            let font = font_from_style(fonts, &MD_TITLE, dpi);
+            let font = font_from_style(&mut ctx.fonts, &MD_TITLE, dpi);
             let x_height = font.x_heights.0 as i32;
-            (x_height, font.em() as i32, (self.rect.height() as i32 - 2 * x_height) / 3)
+            (
+                x_height,
+                font.em() as i32,
+                (self.rect.height() as i32 - 2 * x_height) / 3,
+            )
         };
 
         let (small_half_padding, big_half_padding) = halves(padding);
@@ -124,22 +166,27 @@ impl View for Book {
             let tw = 3 * th / 4;
 
             if preview_path.exists() {
-                if let Some((pixmap, _)) = PdfOpener::new().and_then(|opener| {
-                    opener.open(preview_path)
-                }).and_then(|mut doc| {
-                    doc.dims(0).and_then(|dims| {
-                        let scale = (tw as f32 / dims.0).min(th as f32 / dims.1);
-                        doc.pixmap(Location::Exact(0), scale, CURRENT_DEVICE.color_samples())
+                if let Some((pixmap, _)) = PdfOpener::new()
+                    .and_then(|opener| opener.open(preview_path))
+                    .and_then(|mut doc| {
+                        doc.dims(0).and_then(|dims| {
+                            let scale = (tw as f32 / dims.0).min(th as f32 / dims.1);
+                            doc.pixmap(Location::Exact(0), scale, CURRENT_DEVICE.color_samples())
+                        })
                     })
-                }) {
+                {
                     let dx = (tw - pixmap.width as i32) / 2;
                     let dy = (th - pixmap.height as i32) / 2;
-                    let pt = pt!(self.rect.min.x + padding + dx,
-                                 self.rect.min.y + x_height / 2 + dy);
-                    fb.draw_pixmap(&pixmap, pt);
-                    if fb.inverted() {
-                        let rect = pixmap.rect() + pt;
-                        fb.invert_region(&rect);
+                    let pt = pt!(
+                        self.rect.min.x + padding + dx,
+                        self.rect.min.y + x_height / 2 + dy
+                    );
+
+                    let rect = pixmap.rect() + pt;
+                    ctx.fb.draw_pixmap(&pixmap, pt);
+
+                    if ctx.fb.inverted() {
+                        ctx.fb.invert_region(&rect);
                     }
                 }
             }
@@ -150,16 +197,16 @@ impl View for Book {
 
         // Author
         let author_width = {
-            let font = font_from_style(fonts, &MD_AUTHOR, dpi);
+            let font = font_from_style(&mut ctx.fonts, &MD_AUTHOR, dpi);
             let plan = font.plan(author, Some(width), None);
             let pt = pt!(start_x, self.rect.max.y - baseline);
-            font.render(fb, scheme[1], &plan, pt);
+            font.render(ctx.fb.as_mut(), scheme[1], &plan, pt);
             plan.width
         };
 
         // Title
         {
-            let font = font_from_style(fonts, &MD_TITLE, dpi);
+            let font = font_from_style(&mut ctx.fonts, &MD_TITLE, dpi);
             let mut plan = font.plan(&title, None, None);
             let mut title_lines = 1;
 
@@ -173,9 +220,11 @@ impl View for Book {
                         let max_width = available - if author_width > 0 { padding } else { 0 };
                         font.trim_left(&mut plan2);
                         font.crop_right(&mut plan2, max_width);
-                        let pt = pt!(self.rect.min.x + first_width - small_half_padding - plan2.width,
-                                     self.rect.max.y - baseline);
-                        font.render(fb, scheme[1], &plan2, pt);
+                        let pt = pt!(
+                            self.rect.min.x + first_width - small_half_padding - plan2.width,
+                            self.rect.max.y - baseline
+                        );
+                        font.render(ctx.fb.as_mut(), scheme[1], &plan2, pt);
                         title_lines += 1;
                     } else {
                         font.crop_right(&mut plan, width);
@@ -192,70 +241,104 @@ impl View for Book {
             };
 
             let pt = pt!(start_x, self.rect.min.y + dy);
-            font.render(fb, scheme[1], &plan, pt);
+            font.render(ctx.fb.as_mut(), scheme[1], &plan, pt);
         }
 
         // Year or Progress
         match self.second_column {
             SecondColumn::Year => {
-                let font = font_from_style(fonts, &MD_YEAR, dpi);
+                let font = font_from_style(&mut ctx.fonts, &MD_YEAR, dpi);
                 let plan = font.plan(year, None, None);
                 let dx = (second_width - padding - plan.width) / 2;
                 let dy = (self.rect.height() as i32 - font.x_heights.1 as i32) / 2;
-                let pt = pt!(self.rect.min.x + first_width + big_half_padding + dx,
-                             self.rect.max.y - dy);
-                font.render(fb, scheme[1], &plan, pt);
-            },
+                let pt = pt!(
+                    self.rect.min.x + first_width + big_half_padding + dx,
+                    self.rect.max.y - dy
+                );
+                font.render(ctx.fb.as_mut(), scheme[1], &plan, pt);
+            }
             SecondColumn::Progress => {
                 let progress_height = scale_by_dpi(PROGRESS_HEIGHT, dpi) as i32;
                 let thickness = scale_by_dpi(THICKNESS_SMALL, dpi) as u16;
                 let (small_radius, big_radius) = halves(progress_height);
-                let center = pt!(self.rect.min.x + first_width + second_width / 2,
-                                 self.rect.min.y + self.rect.height() as i32 / 2);
+                let center = pt!(
+                    self.rect.min.x + first_width + second_width / 2,
+                    self.rect.min.y + self.rect.height() as i32 / 2
+                );
                 match self.info.status() {
                     Status::New | Status::Finished => {
-                        let color = if self.info.reader.is_none() { WHITE } else { BLACK };
-                        fb.draw_rounded_rectangle_with_border(&rect![center - pt!(small_radius, small_radius),
-                                                                     center + pt!(big_radius, big_radius)],
-                                                              &CornerSpec::Uniform(small_radius),
-                                                              &BorderSpec { thickness, color: BLACK },
-                                                              &color);
-                    },
+                        let color = if self.info.reader.is_none() {
+                            WHITE
+                        } else {
+                            BLACK
+                        };
+
+                        ctx.fb.draw_rounded_rectangle_with_border(
+                            &rect![
+                                center - pt!(small_radius, small_radius),
+                                center + pt!(big_radius, big_radius)
+                            ],
+                            &CornerSpec::Uniform(small_radius),
+                            &BorderSpec {
+                                thickness,
+                                color: BLACK,
+                            },
+                            &color,
+                        );
+                    }
                     Status::Reading(progress) => {
                         let progress_width = 2 * (second_width - padding) / 3;
                         let (small_progress_width, big_progress_width) = halves(progress_width);
-                        let x_offset = center.x - progress_width / 2 +
-                                       (progress_width as f32 * progress.min(1.0)) as i32;
-                        fb.draw_rounded_rectangle_with_border(&rect![center - pt!(small_progress_width, small_radius),
-                                                                     center + pt!(big_progress_width, big_radius)],
-                                                              &CornerSpec::Uniform(small_radius),
-                                                              &BorderSpec { thickness, color: BLACK },
-                                                              &|x, _| if x < x_offset { READING_PROGRESS } else { WHITE });
+                        let x_offset = center.x - progress_width / 2
+                            + (progress_width as f32 * progress.min(1.0)) as i32;
+
+                        ctx.fb.draw_rounded_rectangle_with_border(
+                            &rect![
+                                center - pt!(small_progress_width, small_radius),
+                                center + pt!(big_progress_width, big_radius)
+                            ],
+                            &CornerSpec::Uniform(small_radius),
+                            &BorderSpec {
+                                thickness,
+                                color: BLACK,
+                            },
+                            &|x, _| {
+                                if x < x_offset {
+                                    READING_PROGRESS
+                                } else {
+                                    WHITE
+                                }
+                            },
+                        );
                     }
                 }
-            },
+            }
         }
 
         // File kind
         {
             let kind = file_info.kind.to_uppercase();
-            let font = font_from_style(fonts, &MD_KIND, dpi);
+            let font = font_from_style(&mut ctx.fonts, &MD_KIND, dpi);
             let mut plan = font.plan(&kind, None, None);
             let letter_spacing = scale_by_dpi(3.0, dpi) as i32;
             plan.space_out(letter_spacing);
-            let pt = pt!(self.rect.max.x - padding - plan.width,
-                         self.rect.min.y + baseline + x_height);
-            font.render(fb, scheme[1], &plan, pt);
+            let pt = pt!(
+                self.rect.max.x - padding - plan.width,
+                self.rect.min.y + baseline + x_height
+            );
+            font.render(ctx.fb.as_mut(), scheme[1], &plan, pt);
         }
 
         // File size
         {
             let size = file_info.size.human_size();
-            let font = font_from_style(fonts, &MD_SIZE, dpi);
+            let font = font_from_style(&mut ctx.fonts, &MD_SIZE, dpi);
             let plan = font.plan(&size, None, None);
-            let pt = pt!(self.rect.max.x - padding - plan.width,
-                         self.rect.max.y - baseline);
-            font.render(fb, scheme[1], &plan, pt);
+            let pt = pt!(
+                self.rect.max.x - padding - plan.width,
+                self.rect.max.y - baseline
+            );
+            font.render(ctx.fb.as_mut(), scheme[1], &plan, pt);
         }
     }
 
